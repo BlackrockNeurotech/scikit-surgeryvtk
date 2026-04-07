@@ -12,6 +12,8 @@ from vtk.util import numpy_support
 import sksurgerycore.utilities.validate_file as vf
 import sksurgeryvtk.models.vtk_base_model as vbm
 import sksurgeryvtk.utils.matrix_utils as mu
+from vtkmodules.util import numpy_support as nps
+from vtkmodules.numpy_interface import dataset_adapter as dsa
 
 # pylint: disable=too-many-instance-attributes, too-many-positional-arguments
 
@@ -100,6 +102,33 @@ class VTKSurfaceModel(vbm.VTKBaseModel):
         self.ambient = self.actor.GetProperty().GetAmbient()
         self.diffuse = self.actor.GetProperty().GetDiffuse()
         self.specular = self.actor.GetProperty().GetSpecular()
+    
+    def set_source(self, vtk_poly_data):
+        self.source = vtk_poly_data
+        # Only create normals if there are none on input
+        self.normals = None
+        if self.source.GetPointData().GetNormals() is None:
+            self.normals = vtk.vtkPolyDataNormals()
+            self.normals.SetInputData(self.source)
+            self.normals.SetAutoOrientNormals(True)
+            self.normals.SetFlipNormals(False)
+        self.transform = vtk.vtkTransform()
+        self.transform.Identity()
+        self.transform_filter = vtk.vtkTransformPolyDataFilter()
+        if self.normals is None:
+            self.transform_filter.SetInputData(self.source)
+        else:
+            self.transform_filter.SetInputConnection(
+                self.normals.GetOutputPort())
+        self.transform_filter.SetTransform(self.transform)
+        self.mapper = vtk.vtkPolyDataMapper()
+        self.mapper.SetInputConnection(self.transform_filter.GetOutputPort())
+        self.mapper.Update()
+        self.actor.SetMapper(self.mapper)
+        self.no_shading = False
+        self.ambient = self.actor.GetProperty().GetAmbient()
+        self.diffuse = self.actor.GetProperty().GetDiffuse()
+        self.specular = self.actor.GetProperty().GetSpecular()
 
     def get_no_shading(self):
         """
@@ -107,6 +136,32 @@ class VTKSurfaceModel(vbm.VTKBaseModel):
         :return: bool
         """
         return self.no_shading
+    
+    def getPointsAndCellsFromPolydata(self):
+        """
+        Extract points and cells from polydata object
+
+        Args:
+            polydata (vtk.vtkPolyData): polydata object representing mesh
+        
+        Returns:
+            ndarray: Array of points
+            ndarrdy: Array of cells
+        """    
+        polydata = self.get_vtk_source_data()
+        # Use numpy wrapper to easily extract points and cells
+        polydata = dsa.WrapDataObject(polydata) if isinstance(polydata, vtk.vtkPolyData) else polydata
+
+        # Get points
+        points = np.array(polydata.GetPoints(), dtype=np.float64)
+
+        # Get cells
+        polygons = np.array(polydata.GetPolygons(), dtype=np.int32)
+        n = polygons[0]+1
+        polygons = np.resize(polygons, (polygons.size//n, n))
+        polygons = polygons[:, 1:n]
+        
+        return points, polygons
 
     def set_no_shading(self, no_shading: bool):
         """
@@ -199,6 +254,17 @@ class VTKSurfaceModel(vbm.VTKBaseModel):
             .GetOutput().GetPointData().GetNormals()
         as_numpy = numpy_support.vtk_to_numpy(vtk_normals)
         return as_numpy
+
+    def get_volume(self):
+        """
+        Returns the volume of the model, which is calculated using vtkMassProperties.
+        :return: float, the volume in cubic millimetres
+        """
+        polydata = self.get_vtk_source_data()
+        mass = vtk.vtkMassProperties()
+        mass.SetInputData(polydata)
+        mass.Update()
+        return mass.GetVolume()
 
     def set_texture(self, filename):
         """
